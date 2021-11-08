@@ -1,18 +1,10 @@
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
-from imutils import contours
-
 import pytesseract
-
+from imutils import contours
 
 # Adding custom options
 TESSERACT_CONF = r'--oem 3 --psm 6'
-
-
-
-
-from classes import Cell
 
 TRESHOLD = 0.9
 MIN_AREA = 1500
@@ -48,6 +40,7 @@ def detect_table(src_img):
     joints_img = cv2.bitwise_and(h_dilate_img, v_dilate_img)
 
     return mask_img, joints_img
+
 
 def get_cell_blocks(file_path):
     # Load image, enlarge, convert to grayscale, Otsu's threshold
@@ -86,24 +79,54 @@ def get_detailed_cell_info(file_path):
 
 def check_region_is_table(region, dots):
     x, y, w, h = cv2.boundingRect(region)
-    dots_region = dots[y:y+h, x:x+w]
+    dots_region = dots[y:y + h, x:x + w]
     if not cv2.countNonZero(dots_region):
         return False
     return True
 
 
-def extract_text_from_region(region):
-    mask = np.ones(image.shape, dtype=np.uint8) * 255
+def get_image_without_vert_and_hor(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
 
-    cnts = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Remove horizontal lines
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
+    detect_horizontal = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=4)
+    cnts = cv2.findContours(detect_horizontal, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cnts = cnts[0] if len(cnts) == 2 else cnts[1]
     for c in cnts:
-        area = cv2.contourArea(c)
-        if area < 1000:
-            x, y, w, h = cv2.boundingRect(c)
-            mask[y:y + h, x:x + w] = image[y:y + h, x:x + w]
+        cv2.drawContours(thresh, [c], -1, 0, -1)
+
+    # Remove vertical lines
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 10))
+    detect_vertical = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel, iterations=4)
+    cnts = cv2.findContours(detect_vertical, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+    for c in cnts:
+        cv2.drawContours(thresh, [c], -1, 0, -1)
+
+    return thresh
+
+
+def extract_text_from_region(region):
+    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+
+    # Remove horizontal lines
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
+    detect_horizontal = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=4)
+    cnts = cv2.findContours(detect_horizontal, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+    for c in cnts:
+        cv2.drawContours(thresh, [c], -1, 0, -1)
+
+    # Remove vertical lines
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 8))
+    detect_vertical = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel, iterations=4)
+    cnts = cv2.findContours(detect_vertical, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+    for c in cnts:
+        cv2.drawContours(thresh, [c], -1, 0, -1)
 
     text = pytesseract.image_to_string(thresh, lang='rus', config=TESSERACT_CONF)
     return text
@@ -111,7 +134,8 @@ def extract_text_from_region(region):
 if __name__ == '__main__':
     file_path = 'pdf_image_data/1.jpg'
     main_image = cv2.imread(file_path)
-
+    ver_and_hor_image = get_image_without_vert_and_hor(main_image
+                                                       )
     detailed_data = get_detailed_cell_info(file_path)
     region_blocks = get_cell_blocks(file_path)
     _, dots = detect_table(main_image)
@@ -122,12 +146,17 @@ if __name__ == '__main__':
         if not check_region_is_table(region_block, dots):
             # определяем просто как текст
             x, y, w, h = cv2.boundingRect(region_block)
+
+            y-=5
+            h+=5
+
             text1 = extract_text_from_region(main_image[y:y + h, x:x + w])
-            text2 = pytesseract.image_to_string(main_image[y:y + h, x:x + w], lang='rus', config=TESSERACT_CONF)
+            text2 = pytesseract.image_to_string(ver_and_hor_image[y:y + h, x:x + w], lang='rus', config=TESSERACT_CONF)
+            text3 = pytesseract.image_to_string(main_image[y:y + h, x:x + w], lang='rus', config=TESSERACT_CONF)
             pass
         else:
             # выделяем блоки в таблице
-
+            continue
             detailed_data_cell_in_region = []
             for detailed_data_cell in detailed_data:
                 detailed_data_cell_rect = cv2.boundingRect(detailed_data_cell)
@@ -143,4 +172,3 @@ if __name__ == '__main__':
         # plt.imshow(table_image)
         # plt.show()
         # cv2.namedWindow('detecttable', cv2.WINDOW_NORMAL)
-
