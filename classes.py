@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 
+TRESHOLD_PIXEL = 5
+TRESHOLD_HEIGHT = 10
+
 
 @dataclass
 class Cell:
@@ -50,6 +53,30 @@ class Cell:
         interception_area = Cell.cells_interception_area(first_cell, second_cell)
 
         return interception_area / min(first_cell_area, second_cell_area)
+
+
+class Table:
+
+    def __init__(self):
+        self.rows = dict()
+        self.cur_row_index = 0
+
+    def add_value(self, item: Cell):
+        if len(self.rows) == 0:
+            self.rows[self.cur_row_index] = [item]
+            return
+
+        cur_row_y = self.rows[self.cur_row_index][0].y
+        cur_row_height = self.rows[self.cur_row_index][0].height
+
+        # проверка на одну линию
+        if cur_row_y - TRESHOLD_PIXEL <= item.y and cur_row_y + cur_row_height + TRESHOLD_HEIGHT >= item.y + item.height:
+
+            if Cell.interception_perc(self.rows[self.cur_row_index][-1], second_cell)
+            self.rows[self.cur_row_index].append(item)
+        else:
+            self.cur_row_index += 1
+            self.rows[self.cur_row_index] = [item]
 
 
 if __name__ == '__main__':
