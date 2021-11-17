@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+SIMPLISITY_TRESHOLD = 0.9
 TRESHOLD_PIXEL = 5
 TRESHOLD_HEIGHT = 10
 
@@ -10,12 +11,14 @@ class Cell:
     y: int
     width: int
     height: int
+    text: str
 
-    def __init__(self, x, y, width, height):
+    def __init__(self, x, y, width, height, text=''):
         self.x = x
         self.y = y
         self.width = width
         self.height = height
+        self.text = text
 
     def get_area(self):
         return self.height * self.width
@@ -54,29 +57,50 @@ class Cell:
 
         return interception_area / min(first_cell_area, second_cell_area)
 
+    def __str__(self):
+        return self.text
+
+    def __repr__(self):
+        return self.text
+
 
 class Table:
 
     def __init__(self):
-        self.rows = dict()
+        self.rows = list()
         self.cur_row_index = 0
+        self.total_area = 0
+
+    def cell_count(self):
+        return sum([len(v) for v in self.rows])
+
 
     def add_value(self, item: Cell):
         if len(self.rows) == 0:
-            self.rows[self.cur_row_index] = [item]
+            self.rows.append([item])
+            self.total_area += item.get_area()
             return
 
         cur_row_y = self.rows[self.cur_row_index][0].y
         cur_row_height = self.rows[self.cur_row_index][0].height
 
+        if item.get_area() >= self.total_area and self.cell_count() > 3:
+            return
+
         # проверка на одну линию
         if cur_row_y - TRESHOLD_PIXEL <= item.y and cur_row_y + cur_row_height + TRESHOLD_HEIGHT >= item.y + item.height:
 
-            if Cell.interception_perc(self.rows[self.cur_row_index][-1], second_cell)
+            # проверка если попали на внитренние блоки. Их нужно удалить
+            while Cell.interception_perc(item, self.rows[self.cur_row_index][-1]) >= SIMPLISITY_TRESHOLD:
+                del self.rows[self.cur_row_index][-1]
             self.rows[self.cur_row_index].append(item)
+            self.total_area += item.get_area()
         else:
+
+            # переносим все на новую строку
             self.cur_row_index += 1
-            self.rows[self.cur_row_index] = [item]
+            self.rows.append([item])
+            self.total_area += item.get_area()
 
 
 if __name__ == '__main__':
