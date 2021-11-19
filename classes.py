@@ -23,6 +23,9 @@ class Cell:
     def get_area(self):
         return self.height * self.width
 
+    def startswith(self, char):
+        return self.text.startswith(char)
+
     @classmethod
     def cells_interception_area(cls, first_cell, second_cell):
         #  x11, y11 - левая верхняя точка первого прямоугольника
@@ -71,9 +74,11 @@ class Table:
         self.cur_row_index = 0
         self.total_area = 0
 
+    def __getitem__(self, index):
+        return self.rows[index]
+
     def cell_count(self):
         return sum([len(v) for v in self.rows])
-
 
     def add_value(self, item: Cell):
         if len(self.rows) == 0:
@@ -84,23 +89,30 @@ class Table:
         cur_row_y = self.rows[self.cur_row_index][0].y
         cur_row_height = self.rows[self.cur_row_index][0].height
 
-        if item.get_area() >= self.total_area and self.cell_count() > 3:
+        if item.get_area() >= self.total_area*0.95 and self.cell_count()>=6:
             return
 
-        # проверка на одну линию
-        if cur_row_y - TRESHOLD_PIXEL <= item.y and cur_row_y + cur_row_height + TRESHOLD_HEIGHT >= item.y + item.height:
+        # проверка если попали на внитренние блоки. Их нужно удалить
+        while Cell.interception_perc(item, self.rows[self.cur_row_index][-1]) >= SIMPLISITY_TRESHOLD:
+            del self.rows[self.cur_row_index][-1]
+            if not self.rows[self.cur_row_index]:
+                self.cur_row_index -= 1
+                del self.rows[self.cur_row_index]
+                break
 
-            # проверка если попали на внитренние блоки. Их нужно удалить
-            while Cell.interception_perc(item, self.rows[self.cur_row_index][-1]) >= SIMPLISITY_TRESHOLD:
-                del self.rows[self.cur_row_index][-1]
+        # проверка на одну линию
+        if (
+                cur_row_y - TRESHOLD_PIXEL <= item.y and cur_row_y + cur_row_height + TRESHOLD_HEIGHT >= item.y + item.height):
             self.rows[self.cur_row_index].append(item)
             self.total_area += item.get_area()
         else:
-
-            # переносим все на новую строку
-            self.cur_row_index += 1
-            self.rows.append([item])
-            self.total_area += item.get_area()
+            if len(self.rows[self.cur_row_index]):
+                # переносим все на новую строку
+                self.cur_row_index += 1
+                self.rows.append([item])
+                self.total_area += item.get_area()
+            else:
+                self.rows[self.cur_row_index].append(item)
 
 
 if __name__ == '__main__':

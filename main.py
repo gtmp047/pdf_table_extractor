@@ -1,11 +1,13 @@
+import datetime
+import json
+import random
 import shutil
 from os import listdir, walk, unlink
 from os.path import isfile, join
-import random
-import datetime
-import json
+import re
 
 import cv2
+import fitz  # this is pymupdf
 import numpy as np
 import pytesseract
 from imutils import contours
@@ -16,9 +18,10 @@ from classes import Cell, Table
 # Adding custom options
 TESSERACT_CONF = r'--oem 3 --psm 6'
 
+BOOLEAN_STRING_SET = {'НЕТ', 'ДА'}
 options = {
-    'FALSE': 'table_content/not_ok.png',
-    'TRUE': 'table_content/ok.png',
+    'НЕТ': 'table_content/not_ok.png',
+    'ДА': 'table_content/ok.png',
 }
 
 SIMPLISITY_TRESHOLD = 0.9
@@ -27,6 +30,7 @@ MIN_AREA = 1500
 
 def _get_cur_time():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def _compare_images(target_image, template):
     w, h = template.shape[:-1]
@@ -54,6 +58,7 @@ def _compare_images(target_image, template):
         cv2.imwrite(f'good/{_get_cur_time()}_.png', target_image)
         return middle_point_rand
     return
+
 
 def detect_table(src_img):
     if len(src_img.shape) == 2:
@@ -118,12 +123,21 @@ def get_detailed_cell_info(image):
     return min_area_cnts
 
 
-def check_region_is_table(region, dots):
+def int_mean(value):
+    return int(np.mean(value))
+
+
+def check_image_contain_all_white_pixels(region, dest_image, checker):
+    if len(dest_image.shape) == 2:
+        gray_img = dest_image
+    elif len(dest_image.shape) == 3:
+        gray_img = cv2.cvtColor(dest_image, cv2.COLOR_BGR2GRAY)
+
     x, y, w, h = cv2.boundingRect(region)
-    dots_region = dots[y:y + h, x:x + w]
-    if not cv2.countNonZero(dots_region):
-        return False
-    return True
+    gray_img_region = gray_img[y:y + h, x:x + w]
+    if not checker(gray_img_region):
+        return True
+    return False
 
 
 def delete_dir_content(path='temp'):
@@ -180,6 +194,119 @@ def extract_text_from_region(region):
 
     return pytesseract.image_to_string(thresh, lang='rus', config=TESSERACT_CONF)
 
+
+def prepare_and_save_data(name, text_arr, table_arr, extracted_fact, raw_text):
+    extracted_fact.update({
+        'Наименование отчета': text_arr[1],
+        'Получатель': text_arr[0],
+        'Наименование организации': text_arr[2],
+        'Юридический адрес': text_arr[3],
+    })
+
+    # Получение списка деятельности
+    activity_list = []
+    activity_table = [table for table in table_arr if table[0][0].startswith('1') and table][0]
+    for row in activity_table:
+        if row[0].text != '1' and row[1].text:
+            activity_list.append(row[1].text)
+    extracted_fact.update({
+        'Основные виды деятельности в отчетном периоде': activity_list
+    })
+
+    # получение предпринимательской деятельности
+    enterprise_activity_list = []
+    enterprise_activity_table = [table for table in table_arr if table[0][0].startswith('2')][0]
+    for row in enterprise_activity_table:
+        if len(row) == 3 and row[0].text != '2' and row[1].text and row[2].text in BOOLEAN_STRING_SET:
+            enterprise_activity_list.append(f'{row[1].text} : {row[2].text}')
+    extracted_fact.update({
+        'Предпринимательская деятельность': enterprise_activity_list
+    })
+
+    # получение источников формирования имущества
+    sources_of_property_list = []
+    sources_of_property_tables = [table for table in table_arr if table[0][0].startswith('3') or
+                                  table[0][0].startswith('З') or table[0][0].startswith('з')]
+    for table in sources_of_property_tables:
+        for row in table:
+            if len(row) == 3 and row[0].text != '3' and row[1].text and row[2].text in BOOLEAN_STRING_SET:
+                sources_of_property_list.append(f'{row[1].text} : {row[2].text}')
+        extracted_fact.update({
+            'Источники формирования имущества': sources_of_property_list
+        })
+
+
+
+    # получение списка агентов управления деятельностью:
+    ruler_list = []
+    ruler_tables = [table for table in table_arr if table[0][0].startswith('4')]
+
+    for table in ruler_tables:
+        temp_ruler = {}
+
+        if table[0][0].text != '4':
+            #  попали на нормальную таблицу
+            temp_ruler[table[0][1].text] = table[0][2].text
+            for row in table:
+                for i, item in enumerate(row):
+                    if ';' in item.text:
+                        temp_ruler['коллегиальный'] = item.text.split(';')[0]
+                        temp_ruler['единоличный'] = item.text.split(';')[1]
+                    if 'Периодичность проведения заседаний' in item.text:
+                        temp_ruler['Периодичность проведения заседаний'] = row[i + 1].text
+                    if 'Проведено заседаний' in item.text:
+                        temp_ruler['Проведено заседаний'] = row[i + 1].text
+
+        else:
+            # попали на первую таблицу где забили на форматирование. Ищем в тупую
+            for row in table:
+                for item in row:
+                    if 'Высший орган управления' in item.text:
+                        temp_str = item.text
+                        temp_ruler['Вид управляющего органа'] = 'Высший орган управления'
+                        temp_str = temp_str.replace('Высший орган управления', '')
+                        temp_str = temp_str.replace('(сведения о персональном составе указываются в листе А)', '')
+                        temp_ruler['Наименование органа'] = temp_str.strip()
+
+                    if 'Периодичность проведения заседаний' in item.text:
+                        temp_str = item.text
+                        temp_str = temp_str.replace('Периодичность проведения заседаний в соответствии с', '')
+                        temp_str = temp_str.replace('учредительными документами', '')
+                        temp_ruler['Периодичность проведения заседаний'] = temp_str.strip()
+
+                    if 'Проведено заседаний' in item.text:
+                        temp_str = item.text
+                        temp_str = temp_str.replace('Проведено заседаний', '')
+                        temp_ruler['Проведено заседаний'] = temp_str.strip()
+
+        ruler_list.append(temp_ruler)
+    extracted_fact.update({
+        'Управление деятельностью': ruler_list
+    })
+
+    com_name_index =[i for i, v in enumerate(text_arr) if v.startswith('Сведения о персональном составе руководящих органов')][0]
+    if com_name_index:
+        com_name = text_arr[com_name_index+1].replace('(полное наименование руководящего органа)')
+        extracted_fact.update({
+            'Наименование органа': com_name
+        })
+
+    # подпись
+    index_of_sign = [i for i, v in enumerate(text_arr) if v.startswith('Лицо, имеющее право без доверенности действовать')]
+    if index_of_sign:
+        sign_text = text_arr[index_of_sign+1].replace('(подпись) (дата) (фамилия, имя, отчество, занимаемая должность)')
+        fio, other = sign_text.split(',')
+        temp_date = re.
+
+        extracted_fact.update({
+            'ФИО подписывающего лица': fio
+        })
+
+
+    with open(f'out/{name}.json', 'w') as f:
+        json.dump(extracted_fact, f, ensure_ascii=False)
+
+
 def _save_data(name, text_arr, table_arr):
     data_json = {
         'text': text_arr,
@@ -189,12 +316,12 @@ def _save_data(name, text_arr, table_arr):
     for table in table_arr:
         table_rows = []
         for row in table.rows:
-            temp_row =[str(i) for i in row]
+            temp_row = [str(i) for i in row]
             table_rows.append(temp_row)
         data_json['tables'].append(table_rows)
 
     with open(f'out/{name}.json', 'w') as f:
-        json.dump(data_json , f, ensure_ascii=False)
+        json.dump(data_json, f, ensure_ascii=False)
 
 
 def extract_text(image):
@@ -206,8 +333,8 @@ if __name__ == '__main__':
     extracted_fact = dict()
     total_text_arr = []
     total_table_arr = []
-    pdf_name = '110391501'
-    numbers_to_extruct = ['огрн', 'инн']
+    pdf_name = '110423401'
+    forgetten_tabels_name = ['огрн', 'инн', 'страница:']
     pdf = convert_from_path(f'pdf/{pdf_name}.pdf')
 
     for i in range(len(pdf)):
@@ -217,6 +344,18 @@ if __name__ == '__main__':
     files = [join('temp', f) for f in listdir('temp') if
              isfile(join('temp', f))]
     files.sort()
+
+    raw_text = ''
+    with fitz.open(f'pdf/{pdf_name}.pdf') as doc:
+        raw_text = ''
+        for page in doc:
+            raw_text += page.get_text()
+    splited_raw_text = raw_text.split('\n')
+    extracted_fact['Дата включения в ЕГРЮЛ'] = splited_raw_text[splited_raw_text.index('ЕГРЮЛ') + 1].replace(' ', '')
+    extracted_fact['ОГРН'] = splited_raw_text[splited_raw_text.index('ОГРН:') + 1].replace(' ', '')
+    extracted_fact['инн'] = splited_raw_text[splited_raw_text.index('ИНН/КПП:') + 1].replace(' ', '')
+    extracted_fact['кпп'] = splited_raw_text[splited_raw_text.index('ИНН/КПП:') + 2].replace(' ', '').replace('/', '')
+    extracted_fact['Наименование отчетного периода'] = [i for i in splited_raw_text if i.startswith('за ')][0]
 
     for image_path in files:
         main_image = image = cv2.imread(image_path)
@@ -232,15 +371,13 @@ if __name__ == '__main__':
             h += 5
             text = extract_text(main_image[y:y + h, x:x + w])
 
-            extructed_num = [i for i in numbers_to_extruct if i in text.lower()]
-
-            if not check_region_is_table(region_block, dots):
+            if check_image_contain_all_white_pixels(region_block, dots, cv2.countNonZero):
                 # определяем просто как текст
                 total_text_arr.append(text)
             else:
                 # запрещенные слова игнорим
                 text = extract_text(main_image[y:y + h, x:x + w])
-                if 'страница:' in text.lower() and text.lower().startswith('страница:'):
+                if any([bool(i) for i in forgetten_tabels_name if i in text.lower() and text.lower().startswith(i)]):
                     continue
 
                 table_struct = Table()
@@ -255,37 +392,30 @@ if __name__ == '__main__':
                     if simplisity >= SIMPLISITY_TRESHOLD and region_block_rect != detailed_data_cell_rect:
                         x, y, w, h = cv2.boundingRect(detailed_data_cell)
 
-                        # иногда
+                        # todo check spelling !!!!!!!!!!!!!!!!!!!!!!!!
 
+                        # иногда при распознавании текста совершенно пустой флагмент определяется как имеющий информацию
+                        # ставлю проверку на это
                         text = extract_text(main_image[y:y + h, x:x + w])
-                        if extructed_num and not text.isdigit():
-                            continue
+                        if check_image_contain_all_white_pixels(detailed_data_cell, ~main_image, int_mean):
+                            text = ''
 
                         # Проверка на присутствие галочек
                         cur_options = []
                         for option_name, path in options.items():
-                            # if ('коллегиальный' in text or 'единоличный' in text) and option_name
                             rule = _compare_images(main_image[y:y + h, x:x + w], cv2.imread(path))
                             if rule:
-                                cur_options.append(option_name)
+                                cur_options.append((option_name, rule))
+
                         if cur_options:
-                            text = ';'.join(cur_options)
+                            if len(cur_options) > 1 and cur_options[0][1][0] > cur_options[1][1][0]:
+                                cur_options.reverse()
+                            text = ';'.join(k for k, v in cur_options)
 
                         detailed_data_cell_in_region.append(detailed_data_cell)
                         table_struct.add_value(Cell(x, y, w, h, text))
 
                 total_table_arr.append(table_struct)
 
-            if extructed_num:
-                text = ''.join([i.text for i in table_struct.rows[0]])
-                if extructed_num[0] != 'инн':
-                    extracted_fact[extructed_num[0]] = text
-                else:
-                    extracted_fact['инн'] = text[:10]
-                    extracted_fact['кпп'] = text[10:]
-                numbers_to_extruct.remove(extructed_num[0])
-                del total_table_arr[-1]
-
     delete_dir_content()
-    _save_data(pdf_name,total_text_arr, total_table_arr)
-
+    prepare_and_save_data(pdf_name, total_text_arr, total_table_arr, extracted_fact, raw_text)
