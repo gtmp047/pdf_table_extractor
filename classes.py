@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 
 SIMPLISITY_TRESHOLD = 0.9
-TRESHOLD_PIXEL = 5
-TRESHOLD_HEIGHT = 10
+TRESHOLD_PIXEL = 20
+TRESHOLD_HEIGHT = 40
 
 
 @dataclass
@@ -89,20 +89,22 @@ class Table:
         cur_row_y = self.rows[self.cur_row_index][0].y
         cur_row_height = self.rows[self.cur_row_index][0].height
 
-        if item.get_area() >= self.total_area*0.95 and self.cell_count()>=6:
-            return
 
         # проверка если попали на внитренние блоки. Их нужно удалить
         while Cell.interception_perc(item, self.rows[self.cur_row_index][-1]) >= SIMPLISITY_TRESHOLD:
             del self.rows[self.cur_row_index][-1]
-            if not self.rows[self.cur_row_index]:
+
+            if not self.rows[self.cur_row_index] and self.cur_row_index:
                 self.cur_row_index -= 1
                 del self.rows[self.cur_row_index]
                 break
 
+            if not bool(self.rows[self.cur_row_index]):
+                break
+
         # проверка на одну линию
-        if (
-                cur_row_y - TRESHOLD_PIXEL <= item.y and cur_row_y + cur_row_height + TRESHOLD_HEIGHT >= item.y + item.height):
+        if (cur_row_y - TRESHOLD_PIXEL <= item.y and
+                cur_row_y + cur_row_height + TRESHOLD_HEIGHT >= item.y + item.height):
             self.rows[self.cur_row_index].append(item)
             self.total_area += item.get_area()
         else:
@@ -113,6 +115,7 @@ class Table:
                 self.total_area += item.get_area()
             else:
                 self.rows[self.cur_row_index].append(item)
+                self.total_area += item.get_area()
 
 
 if __name__ == '__main__':

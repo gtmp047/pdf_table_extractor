@@ -1,13 +1,13 @@
 import datetime
 import json
 import random
+import re
 import shutil
 from os import listdir, walk, unlink
 from os.path import isfile, join
-import re
 
 import cv2
-import fitz  # this is pymupdf
+import fitz
 import numpy as np
 import pytesseract
 from imutils import contours
@@ -25,7 +25,8 @@ options = {
 }
 
 SIMPLISITY_TRESHOLD = 0.9
-MIN_AREA = 1500
+MIN_AREA = 6000
+OK_BUTTON_AREA = 89 * 87
 
 
 def _get_cur_time():
@@ -94,7 +95,7 @@ def get_cell_blocks(image):
     thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
 
     # Morph close to combine adjacent contours into a single contour
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (85, 5))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (200, 20))
     close = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=4)
 
     # Find contours, sort from top-to-bottom
@@ -217,45 +218,54 @@ def prepare_and_save_data(name, text_arr, table_arr, extracted_fact, raw_text):
     enterprise_activity_list = []
     enterprise_activity_table = [table for table in table_arr if table[0][0].startswith('2')][0]
     for row in enterprise_activity_table:
-        if len(row) == 3 and row[0].text != '2' and row[1].text and row[2].text in BOOLEAN_STRING_SET:
-            enterprise_activity_list.append(f'{row[1].text} : {row[2].text}')
+        if row[-1].text in BOOLEAN_STRING_SET:
+            enterprise_activity_list.append(f'{row[-2].text} : {row[-1].text}')
     extracted_fact.update({
         'Предпринимательская деятельность': enterprise_activity_list
     })
 
     # получение источников формирования имущества
     sources_of_property_list = []
-    sources_of_property_tables = [table for table in table_arr if table[0][0].startswith('3') or
-                                  table[0][0].startswith('З') or table[0][0].startswith('з')]
+    sources_of_property_tables = [table for table in table_arr if table[0][0].startswith('3')]
     for table in sources_of_property_tables:
         for row in table:
-            if len(row) == 3 and row[0].text != '3' and row[1].text and row[2].text in BOOLEAN_STRING_SET:
-                sources_of_property_list.append(f'{row[1].text} : {row[2].text}')
+            if row[-1].text in BOOLEAN_STRING_SET:
+                sources_of_property_list.append(f'{row[-2].text} : {row[-1].text}')
         extracted_fact.update({
             'Источники формирования имущества': sources_of_property_list
         })
 
+    # ищем забагованную 4.2 которая лежит в Управление деятельностью:
+    table_initiator_index, row_initiator_index = \
+        [(table_index, row_index) for table_index, table in enumerate(table_arr)
+         for row_index, row in enumerate(table.rows)
+         if row[0].text == '4.2'][0]
+
+    if table_initiator_index:
+        new_table = Table()
+        new_table.rows = table_arr[table_initiator_index][row_initiator_index:]
+        del table_arr[table_initiator_index].rows[row_initiator_index:]
+        table_arr.append(new_table)
 
 
     # получение списка агентов управления деятельностью:
-    ruler_list = []
-    ruler_tables = [table for table in table_arr if table[0][0].startswith('4')]
-
-    for table in ruler_tables:
-        temp_ruler = {}
+    agent_list = []
+    agent_tables = [table for table in table_arr if table[0][0].startswith('4')]
+    for table in agent_tables:
+        temp_agent = {}
 
         if table[0][0].text != '4':
             #  попали на нормальную таблицу
-            temp_ruler[table[0][1].text] = table[0][2].text
+            temp_agent[table[0][1].text] = table[0][2].text
             for row in table:
                 for i, item in enumerate(row):
                     if ';' in item.text:
-                        temp_ruler['коллегиальный'] = item.text.split(';')[0]
-                        temp_ruler['единоличный'] = item.text.split(';')[1]
+                        temp_agent['коллегиальный'] = item.text.split(';')[0]
+                        temp_agent['единоличный'] = item.text.split(';')[1]
                     if 'Периодичность проведения заседаний' in item.text:
-                        temp_ruler['Периодичность проведения заседаний'] = row[i + 1].text
+                        temp_agent['Периодичность проведения заседаний'] = row[i + 1].text
                     if 'Проведено заседаний' in item.text:
-                        temp_ruler['Проведено заседаний'] = row[i + 1].text
+                        temp_agent['Проведено заседаний'] = row[i + 1].text
 
         else:
             # попали на первую таблицу где забили на форматирование. Ищем в тупую
@@ -263,45 +273,62 @@ def prepare_and_save_data(name, text_arr, table_arr, extracted_fact, raw_text):
                 for item in row:
                     if 'Высший орган управления' in item.text:
                         temp_str = item.text
-                        temp_ruler['Вид управляющего органа'] = 'Высший орган управления'
+                        temp_agent['Вид управляющего органа'] = 'Высший орган управления'
                         temp_str = temp_str.replace('Высший орган управления', '')
                         temp_str = temp_str.replace('(сведения о персональном составе указываются в листе А)', '')
-                        temp_ruler['Наименование органа'] = temp_str.strip()
+                        temp_agent['Наименование органа'] = temp_str.strip()
 
                     if 'Периодичность проведения заседаний' in item.text:
                         temp_str = item.text
                         temp_str = temp_str.replace('Периодичность проведения заседаний в соответствии с', '')
                         temp_str = temp_str.replace('учредительными документами', '')
-                        temp_ruler['Периодичность проведения заседаний'] = temp_str.strip()
+                        temp_agent['Периодичность проведения заседаний'] = temp_str.strip()
 
                     if 'Проведено заседаний' in item.text:
                         temp_str = item.text
                         temp_str = temp_str.replace('Проведено заседаний', '')
-                        temp_ruler['Проведено заседаний'] = temp_str.strip()
+                        temp_agent['Проведено заседаний'] = temp_str.strip()
 
-        ruler_list.append(temp_ruler)
+        agent_list.append(temp_agent)
     extracted_fact.update({
-        'Управление деятельностью': ruler_list
+        'Управление деятельностью': agent_list
     })
 
-    com_name_index =[i for i, v in enumerate(text_arr) if v.startswith('Сведения о персональном составе руководящих органов')][0]
+    com_name_index = \
+        [i for i, v in enumerate(text_arr) if v.startswith('Сведения о персональном составе руководящих органов')][0]
     if com_name_index:
-        com_name = text_arr[com_name_index+1].replace('(полное наименование руководящего органа)')
+        com_name = text_arr[com_name_index + 1].replace('(полное наименование руководящего органа)', '')
         extracted_fact.update({
-            'Наименование органа': com_name
+            'Наименование органа': com_name.strip()
         })
 
     # подпись
-    index_of_sign = [i for i, v in enumerate(text_arr) if v.startswith('Лицо, имеющее право без доверенности действовать')]
+    index_of_sign = [i for i, v in enumerate(text_arr) if
+                     v.startswith('Лицо, имеющее право без доверенности действовать')][0]
     if index_of_sign:
-        sign_text = text_arr[index_of_sign+1].replace('(подпись) (дата) (фамилия, имя, отчество, занимаемая должность)')
+        sign_text = text_arr[index_of_sign + 1].replace(
+            '(подпись)', '').replace('(дата)', '').replace('(фамилия, имя, отчество, занимаемая должность)', '')
         fio, other = sign_text.split(',')
-        temp_date = re.
+        sign_date = re.search(r'\d{2}.\d{2}.\d{4}', other).group()
+        sign_position = other.replace(sign_date, '')
 
         extracted_fact.update({
-            'ФИО подписывающего лица': fio
+            'ФИО подписывающего лица': fio.strip(),
+            'Должность': sign_position.strip(),
+            'Дата подписи': sign_date
         })
 
+    # определение списка руководящего состава
+    ruler_list = []
+    ruler_tables = [table for table in table_arr if table[0][0].startswith('Фамилия')]
+    for table in ruler_tables:
+        temp_ruller = {}
+        for row in table:
+            temp_ruller.update({row[-2].text : row[-1].text})
+        ruler_list.append(temp_ruller)
+    extracted_fact.update({
+        'Состав руководящих органов': sources_of_property_list
+    })
 
     with open(f'out/{name}.json', 'w') as f:
         json.dump(extracted_fact, f, ensure_ascii=False)
@@ -335,7 +362,7 @@ if __name__ == '__main__':
     total_table_arr = []
     pdf_name = '110423401'
     forgetten_tabels_name = ['огрн', 'инн', 'страница:']
-    pdf = convert_from_path(f'pdf/{pdf_name}.pdf')
+    pdf = convert_from_path(f'pdf/{pdf_name}.pdf', 500)
 
     for i in range(len(pdf)):
         # Save pages as images in the pdf
@@ -358,7 +385,7 @@ if __name__ == '__main__':
     extracted_fact['Наименование отчетного периода'] = [i for i in splited_raw_text if i.startswith('за ')][0]
 
     for image_path in files:
-        main_image = image = cv2.imread(image_path)
+        main_image = cv2.imread(image_path)
 
         detailed_data = get_detailed_cell_info(main_image)
         detailed_data.reverse()
@@ -367,8 +394,8 @@ if __name__ == '__main__':
 
         for region_block in region_blocks:
             x, y, w, h = cv2.boundingRect(region_block)
-            y -= 5
-            h += 5
+            y -= 10
+            h += 10
             text = extract_text(main_image[y:y + h, x:x + w])
 
             if check_image_contain_all_white_pixels(region_block, dots, cv2.countNonZero):
@@ -392,8 +419,6 @@ if __name__ == '__main__':
                     if simplisity >= SIMPLISITY_TRESHOLD and region_block_rect != detailed_data_cell_rect:
                         x, y, w, h = cv2.boundingRect(detailed_data_cell)
 
-                        # todo check spelling !!!!!!!!!!!!!!!!!!!!!!!!
-
                         # иногда при распознавании текста совершенно пустой флагмент определяется как имеющий информацию
                         # ставлю проверку на это
                         text = extract_text(main_image[y:y + h, x:x + w])
@@ -411,6 +436,11 @@ if __name__ == '__main__':
                             if len(cur_options) > 1 and cur_options[0][1][0] > cur_options[1][1][0]:
                                 cur_options.reverse()
                             text = ';'.join(k for k, v in cur_options)
+
+                        # проверка на попадание на повтор всей таблицы. Проверяем на вхождение подъячеек
+                        if not check_image_contain_all_white_pixels(detailed_data_cell, dots, cv2.countNonZero) and \
+                                OK_BUTTON_AREA * 100 < Cell(*detailed_data_cell_rect).get_area():
+                            continue
 
                         detailed_data_cell_in_region.append(detailed_data_cell)
                         table_struct.add_value(Cell(x, y, w, h, text))
