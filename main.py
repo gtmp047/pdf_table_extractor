@@ -56,7 +56,6 @@ def _compare_images(target_image, template):
                       start_point,
                       end_point, (0, 255, 0), 2)
 
-        cv2.imwrite(f'good/{_get_cur_time()}_.png', target_image)
         return middle_point_rand
     return
 
@@ -327,7 +326,7 @@ def prepare_and_save_data(name, text_arr, table_arr, extracted_fact, raw_text):
             temp_ruller.update({row[-2].text : row[-1].text})
         ruler_list.append(temp_ruller)
     extracted_fact.update({
-        'Состав руководящих органов': sources_of_property_list
+        'Состав руководящих органов': ruler_list
     })
 
     with open(f'out/{name}.json', 'w') as f:
