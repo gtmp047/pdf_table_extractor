@@ -195,12 +195,12 @@ def extract_text_from_region(region):
     return pytesseract.image_to_string(thresh, lang='rus', config=TESSERACT_CONF)
 
 
-def prepare_and_save_data(name, text_arr, table_arr, extracted_fact, raw_text):
+def prepare_and_save_data(name, text_arr, table_arr, extracted_fact):
     extracted_fact.update({
         'Наименование отчета': text_arr[1],
         'Получатель': text_arr[0],
-        'Наименование организации': text_arr[2],
-        'Юридический адрес': text_arr[3],
+        'Наименование организации': text_arr[2].replace('(полное наименование некоммерческой организации)', '').strip(),
+        'Юридический адрес': text_arr[3].replace('(адрес (место нахождения) некоммерческой организации)', '').strip(),
     })
 
     # Получение списка деятельности
@@ -307,7 +307,12 @@ def prepare_and_save_data(name, text_arr, table_arr, extracted_fact, raw_text):
     if index_of_sign:
         sign_text = text_arr[index_of_sign + 1].replace(
             '(подпись)', '').replace('(дата)', '').replace('(фамилия, имя, отчество, занимаемая должность)', '')
-        fio, other = sign_text.split(',')
+
+        # по протоколу должность должна быть отделена от фио, но на это правило иногда забивают (ошибочно)
+        if ',' in sign_text:
+            fio, other = sign_text.split(',')
+        else:
+            fio, other = ' '.join(sign_text.split(' ')[:3]), ' '.join(sign_text.split(' ')[3:])
         sign_date = re.search(r'\d{2}.\d{2}.\d{4}', other).group()
         sign_position = other.replace(sign_date, '')
 
@@ -359,7 +364,8 @@ if __name__ == '__main__':
     extracted_fact = dict()
     total_text_arr = []
     total_table_arr = []
-    pdf_name = '110423401'
+    pdf_list = ['110432101', '110431401', '110423401', '110391501', '110388301']
+    pdf_name = '110388301'
     forgetten_tabels_name = ['огрн', 'инн', 'страница:']
     pdf = convert_from_path(f'pdf/{pdf_name}.pdf', 500)
 
@@ -373,9 +379,9 @@ if __name__ == '__main__':
 
     raw_text = ''
     with fitz.open(f'pdf/{pdf_name}.pdf') as doc:
-        raw_text = ''
         for page in doc:
             raw_text += page.get_text()
+
     splited_raw_text = raw_text.split('\n')
     extracted_fact['Дата включения в ЕГРЮЛ'] = splited_raw_text[splited_raw_text.index('ЕГРЮЛ') + 1].replace(' ', '')
     extracted_fact['ОГРН'] = splited_raw_text[splited_raw_text.index('ОГРН:') + 1].replace(' ', '')
@@ -447,4 +453,4 @@ if __name__ == '__main__':
                 total_table_arr.append(table_struct)
 
     delete_dir_content()
-    prepare_and_save_data(pdf_name, total_text_arr, total_table_arr, extracted_fact, raw_text)
+    prepare_and_save_data(pdf_name, total_text_arr, total_table_arr, extracted_fact)

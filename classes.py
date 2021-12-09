@@ -75,7 +75,10 @@ class Table:
         self.total_area = 0
 
     def __getitem__(self, index):
-        return self.rows[index]
+        if self.cell_count() > 0:
+            return self.rows[index]
+        else:
+            return ''
 
     def cell_count(self):
         return sum([len(v) for v in self.rows])
