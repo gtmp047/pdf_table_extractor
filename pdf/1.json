@@ -1,0 +1,11 @@
+{
+    "os_version": {"Linux Chrome x86_64"},
+    "web_client_version": {"type": "array",
+                           "description": "Полностью параметр из запроса на init, например [0, 4, 2080]"},
+    "browser": {"type": "string", "description": "Брать из 4-го параметра запроса на init"},
+    "browser_id": {"type": "string", "description": "Идентификатор браузера. Ключ WABrowserId из LocalStorage"},
+    "clnttok": {"type": "string",
+                "description": "Ключ WAToken1 из LocalStorage. Начинается, как правило, с 1@"},
+    "srvtok": {"type": "string", "description": "Ключ WAToken2 из LocalStorage."},
+    "mackey": {"type": "string", "description": "Брать из ключа macKey словаря WASecretBundle в LocalStorage"},
+}
