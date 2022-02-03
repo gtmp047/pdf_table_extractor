@@ -17,7 +17,7 @@ MAPPING — описывает маппинг.
         берётся из класса Postprocessors по названию поля
 """
 
-PDF_FILE = 'pdf/110431401.pdf'
+PDF_FILE = 'pdf/1.pdf'
 
 MAPPING = [
     {
@@ -324,7 +324,6 @@ def main():
             continue
 
         value = value_reg.group(1)
-
         postprocessor: Callable = mapping_item.get('postprocessor') or getattr(all_postprocessors, field, None)
 
         if postprocessor:
