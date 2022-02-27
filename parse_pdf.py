@@ -1,9 +1,9 @@
 import json
-import random
-from copy import copy
 import math
+import random
 import re
 import shutil
+from copy import copy
 from os import walk, unlink
 from os.path import join
 from dataclasses import dataclass
@@ -12,6 +12,8 @@ import cv2
 import fitz
 import numpy as np
 import pytesseract
+from PIL import Image, ImageEnhance
+from dataclasses import dataclass
 from imutils import contours
 from pdf2image import convert_from_bytes
 from scipy import ndimage
@@ -131,10 +133,12 @@ ID = '75c0e4c9-b67d-4140-be8f-02a83e8ee58a'
 
 ALLOWED_REPORT_TYPE = {'ОН0001'}
 SIMPLISITY_TRESHOLD = 0.9
-MIN_AREA = 6000
+MIN_AREA = 2000
 OK_BUTTON_AREA = 89 * 87
 TRESHOLD_PIXEL = 20
 TRESHOLD_HEIGHT = 40
+THRESHOLD_MIN = 127
+THRESHOLD_MAX = 255
 
 TESSERACT_CONF = r'--oem 3 --psm 6'
 
@@ -145,6 +149,7 @@ BUTTON_OPTIONS = {
     'НЕТ': 'table_content/not_ok.png',
     YES: 'table_content/ok.png',
 }
+
 
 
 # region classes
@@ -266,8 +271,18 @@ class Table:
 # endregion
 
 # region table_extract_funcs
-def centrate_image(image):
-    img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+def sharp_image(numpy_image):
+    image_pil = Image.fromarray(numpy_image.astype('uint8'), 'L')
+    # image_pil = image_pil.crop((0, 30, image_pil.width, image_pil.height-30)).save()
+    enhancer = ImageEnhance.Sharpness(image_pil)
+    factor = 5
+    sharped_image = enhancer.enhance(factor)
+    sharped_image.save('sharpened-image.png')
+
+    return np.array(sharped_image)
+
+
+def centrate_image(img_gray):
     img_edges = cv2.Canny(img_gray, 100, 100, apertureSize=3)
     lines = cv2.HoughLinesP(img_edges, 1, math.pi / 180.0, 100, minLineLength=100, maxLineGap=5)
 
@@ -278,8 +293,10 @@ def centrate_image(image):
         angles.append(angle)
 
     median_angle = np.median(angles)
-    img_rotated = ndimage.rotate(image, median_angle, reshape=False)
-    print(f"Angle is {median_angle:.04f}")
+    if median_angle <= 30 and median_angle >= -30:
+        img_rotated = ndimage.rotate(img_gray, median_angle, reshape=False)
+    else:
+        return img_gray
 
     return img_rotated
 
@@ -311,65 +328,17 @@ def _compare_images(target_image, template):
     return
 
 
-def detect_table(src_img):
-    if len(src_img.shape) == 2:
-        gray_img = src_img
-    elif len(src_img.shape) == 3:
-        gray_img = cv2.cvtColor(src_img, cv2.COLOR_BGR2GRAY)
+def get_detailed_cell_info(grey_table_image_contour):
+    image = cv2.threshold(grey_table_image_contour, THRESHOLD_MIN, THRESHOLD_MAX, cv2.THRESH_BINARY)[1]
+    thresh = cv2.inRange(image, THRESHOLD_MIN, THRESHOLD_MAX)
 
-    thresh_img = cv2.adaptiveThreshold(~gray_img, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, -2)
-    h_img = thresh_img.copy()
-    v_img = thresh_img.copy()
-    scale = 70
-    h_size = int(h_img.shape[1] / scale)
-
-    h_structure = cv2.getStructuringElement(cv2.MORPH_RECT, (h_size, 1))
-    h_erode_img = cv2.erode(h_img, h_structure, 1)
-
-    h_dilate_img = cv2.dilate(h_erode_img, h_structure, 1)
-    v_size = int(v_img.shape[0] / scale)
-
-    v_structure = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_size))
-    v_erode_img = cv2.erode(v_img, v_structure, 1)
-    v_dilate_img = cv2.dilate(v_erode_img, v_structure, 1)
-
-    mask_img = h_dilate_img + v_dilate_img
-    joints_img = cv2.bitwise_and(h_dilate_img, v_dilate_img)
-
-    return mask_img, joints_img
-
-
-def get_cell_blocks(image):
-    # Load image, enlarge, convert to grayscale, Otsu's threshold
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-
-    # Morph close to combine adjacent contours into a single contour
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (200, 20))
-    close = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=4)
-
-    # Find contours, sort from top-to-bottom
-    # Iterate through contours, extract row ROI, OCR, and parse data
-    cnts = cv2.findContours(close, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-    (cnts, _) = contours.sort_contours(cnts, method="top-to-bottom")
-
-    return cnts
-
-
-def get_detailed_cell_info(image):
-    grey_table_image_contour = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    ret, thresh_value = cv2.threshold(grey_table_image_contour, 180, 255, cv2.THRESH_BINARY_INV)
-    kernel = np.ones((3, 3), np.uint8)
-    dilated_value = cv2.dilate(thresh_value, kernel, iterations=2)
-    cnts, hierarchy = cv2.findContours(dilated_value, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    contours, hierarchy = cv2.findContours(thresh.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
     min_area_cnts = []
-    for c in cnts:
-        _, _, w, h = cv2.boundingRect(c)
-        if cv2.contourArea(c) > MIN_AREA and h >= 25 and w >= 25:
-            min_area_cnts.append(c)
+    for cnt in contours:
+        _, _, w, h = cv2.boundingRect(cnt)
+        if cv2.contourArea(cnt) > MIN_AREA and h >= 25 and w >= 25:
+            min_area_cnts.append(cnt)
 
     return min_area_cnts
 
@@ -399,10 +368,9 @@ def delete_dir_content(path='temp'):
             shutil.rmtree(join(root, d))
 
 
-def get_image_with_vert_and_hor(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+def get_image_with_vert_and_hor(gray):
     thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-    blank_image = ~np.zeros(image.shape, np.uint8)
+    blank_image = ~np.zeros(gray.shape, np.uint8)
 
     # Remove horizontal lines
     horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
@@ -421,46 +389,6 @@ def get_image_with_vert_and_hor(image):
         cv2.drawContours(blank_image, [c], -1, 0, -1)
 
     return blank_image
-
-
-def extract_text_from_region(region):
-    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-
-    # Remove horizontal lines
-    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
-    detect_horizontal = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=4)
-    cnts = cv2.findContours(detect_horizontal, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-    for c in cnts:
-        cv2.drawContours(thresh, [c], -1, 0, -1)
-
-    # Remove vertical lines
-    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 8))
-    detect_vertical = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel, iterations=4)
-    cnts = cv2.findContours(detect_vertical, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-    for c in cnts:
-        cv2.drawContours(thresh, [c], -1, 0, -1)
-
-    return pytesseract.image_to_string(thresh, lang='rus', config=TESSERACT_CONF)
-
-
-def _save_data(name, extracted_text_arr, extracted_table_arr):
-    data_json = {
-        'text': extracted_text_arr,
-        'tables': []
-    }
-
-    for table in extracted_table_arr:
-        table_rows = []
-        for row in table.rows:
-            temp_row = [str(i) for i in row]
-            table_rows.append(temp_row)
-        data_json['tables'].append(table_rows)
-
-    with open(f'out/{name}.json', 'w') as f:
-        json.dump(data_json, f, ensure_ascii=False)
 
 
 def extract_text(image):
@@ -647,146 +575,132 @@ def _extract_ОН0001(raw_text, extracted_text_arr, extracted_table_arr):
     return extracted_fact
 
 
-def print_region_on_image(image, regions_data, filename, rgb=(0, 0, 255)):
+def print_region_on_image(image, regions_data, filename, rgb=(255, 0, 0)):
     table_image = copy(image)
     for c in regions_data:
         x, y, w, h = cv2.boundingRect(c)
         if w * h > MIN_AREA:
+            rgb = (random.randint(10, 255), random.randint(10, 255),random.randint(10, 255))
             table_image = cv2.rectangle(image, (x, y), (x + w, y + h), rgb, 2)
 
     cv2.imwrite(f'{filename}.jpg', table_image)
 
 
-def create_table_image_by_dots(dots):
+def get_image_bin(image):
+    MAX_COLOR_VAL = 255
+    BLOCK_SIZE = 15
+    SUBTRACT_FROM_MEAN = -3
+    BLUR_KERNEL_SIZE = (15, 15)
+    STD_DEV_X_DIRECTION = 0
+    STD_DEV_Y_DIRECTION = 0
 
-    def concatenate_horizontal_and_vertical_dots(dots, i_index, y_index, res_image):
-        heigth = dots.shape[0]
-        weigth = dots.shape[1]
+    blurred = cv2.GaussianBlur(image, BLUR_KERNEL_SIZE, STD_DEV_X_DIRECTION, STD_DEV_Y_DIRECTION)
+    img_bin = cv2.adaptiveThreshold(
+        ~sharp_image(blurred),
+        MAX_COLOR_VAL,
+        cv2.ADAPTIVE_THRESH_MEAN_C,
+        cv2.THRESH_BINARY,
+        BLOCK_SIZE,
+        SUBTRACT_FROM_MEAN,
+    )
 
-        directions = [
-            range(i_index, 0),
-            range(i_index, heigth),
-            range(y_index, weigth),
-            range(y_index, 0)
-        ]
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (400, 1))
+    horizontally_opened = cv2.morphologyEx(img_bin, cv2.MORPH_OPEN, horizontal_kernel)
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50))
+    vertically_opened = cv2.morphologyEx(img_bin, cv2.MORPH_OPEN, vertical_kernel)
 
-        line_length = 0
-        switcher = True
-        for i in range(i_index, weigth-1):
-            if dots[y_index][i] and not switcher:
-                break
-            if not dots[y_index][i] and switcher:
-                # встретили первый нулевой элемент
-                switcher = False
-            line_length += 1
-        else:
-            line_length = 0
-        if line_length:
-            res_image[y_index][i_index:i_index+line_length] = 255
+    horizontally_dilated = cv2.dilate(horizontally_opened, cv2.getStructuringElement(cv2.MORPH_RECT, (10, 1)))
+    vertically_dilated = cv2.dilate(vertically_opened, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 10)))
 
-        line_length = 0
-        switcher = True
-        for y in range(y_index, heigth - 1):
-            if dots[y][i_index] and not switcher:
-                break
-            if not dots[y][i_index] and switcher:
-                # встретили первый нулевой элемент
-                switcher = False
-            line_length += 1
-        else:
-            line_length = 0
-        if line_length:
-            # костыль
-            for i in range(line_length):
-                res_image[y_index + i][i_index] = 255
-
-    res_image = copy(dots)
-
-    for y_index, i in enumerate(dots):
-        for i_index, y in enumerate(i):
-            # если попали на не пустой пиксель, то сначала ищем соседние точки для него
-            # и потом соединяем эти точки (заполныем  значением 255)
-            if y:
-                concatenate_horizontal_and_vertical_dots(dots, i_index, y_index, res_image)
-
-    return res_image
+    return img_bin, horizontally_dilated + vertically_dilated
 
 
 def extract_info_pdf(pdf_pages):
     total_text_arr = []
     total_table_arr = []
 
-    # таблицы которые будем обрабатывать из голого текста. Все отчеты имеют данные таблицы.
-    forgetten_tabels_name = ['огрн', 'инн', 'страница:']
+    # # таблицы которые будем обрабатывать из голого текста. Все отчеты имеют данные таблицы.
+    # forgetten_tabels_name = ['огрн', 'инн', 'страница:']
 
-    for page in pdf_pages:
-        main_image = centrate_image(np.array(page.convert('RGB')))
+    for index, page in enumerate(pdf_pages):
+        # поворачиваем картинку
+        main_image = cv2.cvtColor(np.array(page.convert('RGB')), cv2.COLOR_BGR2GRAY)
+        main_image = centrate_image(main_image)
+        main_image = sharp_image(main_image)
 
-        detailed_data = get_detailed_cell_info(main_image)
-        print_region_on_image(main_image, detailed_data, 'detailed_data', rgb=(255, 0, 0))
+        # cut image
+        image_pil = Image.fromarray(main_image.astype('uint8'), 'L')
+        image_pil = image_pil.crop((50, 50, image_pil.width - 50, image_pil.height - 50))
+        image_pil = np.array(image_pil)
+        cv2.imwrite(f'trash/{index}_rotated.jpg', image_pil)
+
+        img_bin, mask = get_image_bin(image_pil)
+        cv2.imwrite(f'trash/{index}_img_bin.jpg', img_bin)
+        cv2.imwrite(f'trash/{index}_mask.jpg', mask)
+
+        # get detailed data
+        detailed_data = get_detailed_cell_info(mask)
+        print_region_on_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB), detailed_data, f'trash/{index}_detailed_data',
+                              rgb=(0, 0, 255))
         detailed_data.reverse()
 
-        region_blocks = get_cell_blocks(main_image)
-        print_region_on_image(main_image, region_blocks, 'region_blocks')
-        _, dots = detect_table(main_image)
-        cv2.imwrite('dots.jpg', dots)
+        for region_block in detailed_data:
 
-        cv2.imwrite('rect_by_dots.jpg', create_table_image_by_dots(dots))
 
-        for region_block in region_blocks:
-            x, y, w, h = cv2.boundingRect(region_block)
-            y -= 10
-            h += 10
+
+        x, y, w, h = cv2.boundingRect(region_block)
+        y -= 10
+        h += 10
+        text = extract_text(main_image[y:y + h, x:x + w])
+
+        if check_image_contain_all_white_pixels(region_block, dots, cv2.countNonZero):
+            # определяем просто как текст
+            total_text_arr.append(text)
+        else:
+            # запрещенные слова игнорим
             text = extract_text(main_image[y:y + h, x:x + w])
+            if any([bool(i) for i in forgetten_tabels_name if i in text.lower() and text.lower().startswith(i)]):
+                continue
 
-            if check_image_contain_all_white_pixels(region_block, dots, cv2.countNonZero):
-                # определяем просто как текст
-                total_text_arr.append(text)
-            else:
-                # запрещенные слова игнорим
-                text = extract_text(main_image[y:y + h, x:x + w])
-                if any([bool(i) for i in forgetten_tabels_name if i in text.lower() and text.lower().startswith(i)]):
-                    continue
+            table_struct = Table()
 
-                table_struct = Table()
+            # выделяем блоки в таблице
+            detailed_data_cell_in_region = []
+            for detailed_data_cell in detailed_data:
+                detailed_data_cell_rect = cv2.boundingRect(detailed_data_cell)
+                region_block_rect = cv2.boundingRect(region_block)
 
-                # выделяем блоки в таблице
-                detailed_data_cell_in_region = []
-                for detailed_data_cell in detailed_data:
-                    detailed_data_cell_rect = cv2.boundingRect(detailed_data_cell)
-                    region_block_rect = cv2.boundingRect(region_block)
+                simplisity = Cell.interception_perc(Cell(*region_block_rect), Cell(*detailed_data_cell_rect))
+                if simplisity >= SIMPLISITY_TRESHOLD and region_block_rect != detailed_data_cell_rect:
+                    x, y, w, h = cv2.boundingRect(detailed_data_cell)
 
-                    simplisity = Cell.interception_perc(Cell(*region_block_rect), Cell(*detailed_data_cell_rect))
-                    if simplisity >= SIMPLISITY_TRESHOLD and region_block_rect != detailed_data_cell_rect:
-                        x, y, w, h = cv2.boundingRect(detailed_data_cell)
+                    # иногда при распознавании текста совершенно пустой флагмент определяется как имеющий информацию
+                    # ставлю проверку на это
+                    text = extract_text(main_image[y:y + h, x:x + w])
+                    if check_image_contain_all_white_pixels(detailed_data_cell, ~main_image, int_mean):
+                        text = ''
 
-                        # иногда при распознавании текста совершенно пустой флагмент определяется как имеющий информацию
-                        # ставлю проверку на это
-                        text = extract_text(main_image[y:y + h, x:x + w])
-                        if check_image_contain_all_white_pixels(detailed_data_cell, ~main_image, int_mean):
-                            text = ''
+                    # Проверка на присутствие галочек
+                    cur_options = []
+                    for option_name, path in BUTTON_OPTIONS.items():
+                        rule = _compare_images(main_image[y:y + h, x:x + w], cv2.imread(path))
+                        if rule:
+                            cur_options.append((option_name, rule))
 
-                        # Проверка на присутствие галочек
-                        cur_options = []
-                        for option_name, path in BUTTON_OPTIONS.items():
-                            rule = _compare_images(main_image[y:y + h, x:x + w], cv2.imread(path))
-                            if rule:
-                                cur_options.append((option_name, rule))
+                    if cur_options:
+                        if len(cur_options) > 1 and cur_options[0][1][0] > cur_options[1][1][0]:
+                            cur_options.reverse()
+                        text = ';'.join(k for k, v in cur_options)
 
-                        if cur_options:
-                            if len(cur_options) > 1 and cur_options[0][1][0] > cur_options[1][1][0]:
-                                cur_options.reverse()
-                            text = ';'.join(k for k, v in cur_options)
+                    # проверка на попадание на повтор всей таблицы. Проверяем на вхождение подъячеек
+                    if not check_image_contain_all_white_pixels(detailed_data_cell, dots, cv2.countNonZero) and \
+                            OK_BUTTON_AREA * 100 < Cell(*detailed_data_cell_rect).get_area():
+                        continue
 
-                        # проверка на попадание на повтор всей таблицы. Проверяем на вхождение подъячеек
-                        if not check_image_contain_all_white_pixels(detailed_data_cell, dots, cv2.countNonZero) and \
-                                OK_BUTTON_AREA * 100 < Cell(*detailed_data_cell_rect).get_area():
-                            continue
+                    detailed_data_cell_in_region.append(detailed_data_cell)
+                    table_struct.add_value(Cell(x, y, w, h, text))
 
-                        detailed_data_cell_in_region.append(detailed_data_cell)
-                        table_struct.add_value(Cell(x, y, w, h, text))
-
-                total_table_arr.append(table_struct)
+            total_table_arr.append(table_struct)
 
     return total_text_arr, total_table_arr
 

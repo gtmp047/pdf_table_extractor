@@ -1,33 +1,50 @@
-
+from table_ocr import pdf_to_images, extract_tables, extract_cells
 import cv2
+from imutils import contours
+from PIL import Image, ImageEnhance
+import numpy as np
 
-image = cv2.imread('pdf_image_data/1.jpg')
-gray = cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
-thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+tess_params = ["--psm", "6", "--oem", "3", "-l", "rus"]
+image_path = 'rotated.jpg'
 
-# Remove horizontal lines
-horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
-detect_horizontal = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=4)
-cnts = cv2.findContours(detect_horizontal, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-for c in cnts:
-    cv2.drawContours(thresh, [c], -1, 0, -1)
 
-# Remove vertical lines
-vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 10))
-detect_vertical = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel, iterations=4)
-cnts = cv2.findContours(detect_vertical, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-for c in cnts:
-    cv2.drawContours(thresh, [c], -1, 0, -1)
+# image_pil = Image.open(image_path)
+# image_pil = image_pil.crop((50, 50, image_pil.width-50, image_pil.height-50)).save(image_path)
 
-# Repair image
-repair_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 8))
-result = 255 - cv2.morphologyEx(255 - image, cv2.MORPH_CLOSE, repair_kernel, iterations=1)
+image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
 
-cv2.imshow('thresh', thresh)
-cv2.imshow('detect_horizontal', detect_horizontal)
-cv2.imshow('detect_vertical', detect_vertical)
-cv2.imshow('image', image)
-cv2.imshow('result', result)
-cv2.waitKey()
+MAX_COLOR_VAL = 255
+BLOCK_SIZE = 15
+SUBTRACT_FROM_MEAN = -2
+BLUR_KERNEL_SIZE = (15, 15)
+STD_DEV_X_DIRECTION = 0
+STD_DEV_Y_DIRECTION = 0
+
+blurred = cv2.GaussianBlur(image, BLUR_KERNEL_SIZE, STD_DEV_X_DIRECTION, STD_DEV_Y_DIRECTION)
+img_bin = cv2.adaptiveThreshold(
+    ~blurred,
+    MAX_COLOR_VAL,
+    cv2.ADAPTIVE_THRESH_MEAN_C,
+    cv2.THRESH_BINARY,
+    BLOCK_SIZE,
+    SUBTRACT_FROM_MEAN,
+)
+cv2.imwrite("img_bin.png", img_bin)
+
+
+vertical = horizontal = img_bin.copy()
+SCALE = 5
+image_width, image_height = horizontal.shape
+horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (400, 1))
+horizontally_opened = cv2.morphologyEx(img_bin, cv2.MORPH_OPEN, horizontal_kernel)
+vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50))
+vertically_opened = cv2.morphologyEx(img_bin, cv2.MORPH_OPEN, vertical_kernel)
+
+horizontally_dilated = cv2.dilate(horizontally_opened, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1)))
+vertically_dilated = cv2.dilate(vertically_opened, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5)))
+
+mask = horizontally_dilated + vertically_dilated
+
+cv2.imwrite("mask_rotated.png", mask)
+
+# get_cell_blocks
