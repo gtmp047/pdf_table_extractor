@@ -16,6 +16,7 @@ from PIL import Image, ImageEnhance
 from dataclasses import dataclass
 from imutils import contours
 from pdf2image import convert_from_bytes
+from pyaspeller import YandexSpeller
 from scipy import ndimage
 
 from cas_http_anonym_web import HttpAnonymWeb, DisposableHostingSessionManagerWithNetworkErrorsHandler
@@ -141,6 +142,7 @@ THRESHOLD_MIN = 127
 THRESHOLD_MAX = 255
 
 TESSERACT_CONF = r'--oem 3 --psm 6'
+SPELLER = YandexSpeller()
 
 YES = 'ДА'
 NO = 'НЕТ'
@@ -619,10 +621,11 @@ def extract_info_pdf(pdf_pages):
     total_text_arr = []
     total_table_arr = []
 
-    # # таблицы которые будем обрабатывать из голого текста. Все отчеты имеют данные таблицы.
-    # forgetten_tabels_name = ['огрн', 'инн', 'страница:']
+    translate_list = []
+    import time
 
-    for index, page in enumerate(pdf_pages):
+
+    for page_index, page in enumerate(pdf_pages):
         # поворачиваем картинку
         main_image = cv2.cvtColor(np.array(page.convert('RGB')), cv2.COLOR_BGR2GRAY)
         main_image = centrate_image(main_image)
@@ -632,93 +635,90 @@ def extract_info_pdf(pdf_pages):
         image_pil = Image.fromarray(main_image.astype('uint8'), 'L')
         image_pil = image_pil.crop((50, 50, image_pil.width - 50, image_pil.height - 50))
         image_pil = np.array(image_pil)
-        cv2.imwrite(f'trash/{index}_rotated.jpg', image_pil)
+        cv2.imwrite(f'trash/{page_index}_rotated.jpg', image_pil)
 
         img_bin, mask = get_image_bin(image_pil)
-        cv2.imwrite(f'trash/{index}_img_bin.jpg', img_bin)
-        cv2.imwrite(f'trash/{index}_mask.jpg', mask)
+        cv2.imwrite(f'trash/{page_index}_img_bin.jpg', img_bin)
+        cv2.imwrite(f'trash/{page_index}_mask.jpg', mask)
 
         # get detailed data
         detailed_data = get_detailed_cell_info(mask)
-        print_region_on_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB), detailed_data, f'trash/{index}_detailed_data',
+        print_region_on_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB), detailed_data, f'trash/{page_index}_detailed_data',
                               rgb=(0, 0, 255))
         detailed_data.reverse()
 
-        for region_block in detailed_data:
+
+        for region_index, region_block in enumerate(detailed_data):
+            time.sleep(0.2)
+            x, y, w, h = cv2.boundingRect(region_block)
+            unique_region_index = f'{page_index}_{region_index}'
 
 
 
-        x, y, w, h = cv2.boundingRect(region_block)
-        y -= 10
-        h += 10
-        text = extract_text(main_image[y:y + h, x:x + w])
+            extracted_text = extract_text(image_pil[y:y + h, x:x + w])
+            yandex_text = SPELLER._apply_suggestion(extracted_text, SPELLER._spell_text(extracted_text))
+            if extracted_text!=yandex_text:
+                cv2.imwrite(f'data_image/{unique_region_index}_region.jpg', image_pil[y:y + h, x:x + w])
+                translate_list.append(tuple([unique_region_index, extracted_text, yandex_text]))
 
-        if check_image_contain_all_white_pixels(region_block, dots, cv2.countNonZero):
-            # определяем просто как текст
-            total_text_arr.append(text)
-        else:
-            # запрещенные слова игнорим
-            text = extract_text(main_image[y:y + h, x:x + w])
-            if any([bool(i) for i in forgetten_tabels_name if i in text.lower() and text.lower().startswith(i)]):
-                continue
+            print(f'done {unique_region_index}')
 
-            table_struct = Table()
+    with open('cvr_results.txt', 'a') as f:
+        for item in translate_list:
+            f.write(f'{str(item)}\n')
 
-            # выделяем блоки в таблице
-            detailed_data_cell_in_region = []
-            for detailed_data_cell in detailed_data:
-                detailed_data_cell_rect = cv2.boundingRect(detailed_data_cell)
-                region_block_rect = cv2.boundingRect(region_block)
 
-                simplisity = Cell.interception_perc(Cell(*region_block_rect), Cell(*detailed_data_cell_rect))
-                if simplisity >= SIMPLISITY_TRESHOLD and region_block_rect != detailed_data_cell_rect:
-                    x, y, w, h = cv2.boundingRect(detailed_data_cell)
 
-                    # иногда при распознавании текста совершенно пустой флагмент определяется как имеющий информацию
-                    # ставлю проверку на это
-                    text = extract_text(main_image[y:y + h, x:x + w])
-                    if check_image_contain_all_white_pixels(detailed_data_cell, ~main_image, int_mean):
-                        text = ''
+        # table_struct = Table()
 
-                    # Проверка на присутствие галочек
-                    cur_options = []
-                    for option_name, path in BUTTON_OPTIONS.items():
-                        rule = _compare_images(main_image[y:y + h, x:x + w], cv2.imread(path))
-                        if rule:
-                            cur_options.append((option_name, rule))
-
-                    if cur_options:
-                        if len(cur_options) > 1 and cur_options[0][1][0] > cur_options[1][1][0]:
-                            cur_options.reverse()
-                        text = ';'.join(k for k, v in cur_options)
-
-                    # проверка на попадание на повтор всей таблицы. Проверяем на вхождение подъячеек
-                    if not check_image_contain_all_white_pixels(detailed_data_cell, dots, cv2.countNonZero) and \
-                            OK_BUTTON_AREA * 100 < Cell(*detailed_data_cell_rect).get_area():
-                        continue
-
-                    detailed_data_cell_in_region.append(detailed_data_cell)
-                    table_struct.add_value(Cell(x, y, w, h, text))
-
-            total_table_arr.append(table_struct)
-
-    return total_text_arr, total_table_arr
+    #     # выделяем блоки в таблице
+    #     detailed_data_cell_in_region = []
+    #     for detailed_data_cell in detailed_data:
+    #         detailed_data_cell_rect = cv2.boundingRect(detailed_data_cell)
+    #         region_block_rect = cv2.boundingRect(region_block)
+    #
+    #         simplisity = Cell.interception_perc(Cell(*region_block_rect), Cell(*detailed_data_cell_rect))
+    #         if simplisity >= SIMPLISITY_TRESHOLD and region_block_rect != detailed_data_cell_rect:
+    #             x, y, w, h = cv2.boundingRect(detailed_data_cell)
+    #
+    #             # иногда при распознавании текста совершенно пустой флагмент определяется как имеющий информацию
+    #             # ставлю проверку на это
+    #             text = extract_text(main_image[y:y + h, x:x + w])
+    #             if check_image_contain_all_white_pixels(detailed_data_cell, ~main_image, int_mean):
+    #                 text = ''
+    #
+    #             # Проверка на присутствие галочек
+    #             cur_options = []
+    #             for option_name, path in BUTTON_OPTIONS.items():
+    #                 rule = _compare_images(main_image[y:y + h, x:x + w], cv2.imread(path))
+    #                 if rule:
+    #                     cur_options.append((option_name, rule))
+    #
+    #             if cur_options:
+    #                 if len(cur_options) > 1 and cur_options[0][1][0] > cur_options[1][1][0]:
+    #                     cur_options.reverse()
+    #                 text = ';'.join(k for k, v in cur_options)
+    #
+    #             # проверка на попадание на повтор всей таблицы. Проверяем на вхождение подъячеек
+    #             if not check_image_contain_all_white_pixels(detailed_data_cell, dots, cv2.countNonZero) and \
+    #                     OK_BUTTON_AREA * 100 < Cell(*detailed_data_cell_rect).get_area():
+    #                 continue
+    #
+    #             detailed_data_cell_in_region.append(detailed_data_cell)
+    #             table_struct.add_value(Cell(x, y, w, h, text))
+    #
+    #     total_table_arr.append(table_struct)
+    #
+    # return total_text_arr, total_table_arr
 
 
 def get_data_from_pdf(pdf_bytes, report_type):
     raw_text = ''
     # получаем постраничное представление pdf
     pdf_pages = convert_from_bytes(pdf_bytes)
-
-    # помимо фото, забираем голые текстовые данные из pdf
-    with fitz.open('pdf', pdf_bytes) as doc:
-        for page in doc:
-            raw_text += page.get_text()
-
     extracted_text_arr, extracted_table_arr = extract_info_pdf(pdf_pages)
-
-    if report_type == 'ОН0001':
-        return _extract_ОН0001(raw_text, extracted_text_arr, extracted_table_arr)
+    pass
+    return _extract_ОН0001(raw_text, extracted_text_arr, extracted_table_arr)
 
 
 def process() -> dict:
@@ -726,15 +726,15 @@ def process() -> dict:
 
     result = {
         'result': [{
-            'input': input_data,
-            'output': output
+            # 'input': input_data,
+            # 'output': output
         }],
         'raw_output': {
         }
     }
 
     input_url = 'http://unro.minjust.ru/CMS/documentmanagement/directlink.aspx?Inline=false&OwnerKey=3&qid=1&doc=103217'
-    report_type = input_data.get(TypeOfReport.name)
+    # report_type = input_data.get(TypeOfReport.name)
 
     # if report_type not in ALLOWED_REPORT_TYPE:
     #     return result
@@ -745,19 +745,19 @@ def process() -> dict:
     with open('pdf/1.pdf', 'rb') as f:
         # resp_bytes = resp.content
         resp_bytes = f.read()
-    temp_output = get_data_from_pdf(resp_bytes, report_type)
+    temp_output = get_data_from_pdf(resp_bytes, 'ОИА001')
     if temp_output:
         output.append(temp_output)
 
     return result
 
-
-if __name__ == '__main__':
-    input_data = get_input_data(INPUT_SCHEMA)
-
-    try:
-        output_data = process()
-    except Exception as e:
-        handle_exception(e)
-    else:
-        set_output_data(output_data, OUTPUT_SCHEMA)
+output_data = process()
+# if __name__ == '__main__':
+#     input_data = get_input_data(INPUT_SCHEMA)
+#
+#     try:
+#         output_data = process()
+#     except Exception as e:
+#         handle_exception(e)
+#     else:
+#         set_output_data(output_data, OUTPUT_SCHEMA)
